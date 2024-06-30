@@ -61,7 +61,6 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 		/* Write out some zeros */
 		memset(buf,0,1920);
 		while (delta > 960) {
-			//write(fd_pipe,buf,1920);
 			//fwrite(buf,1920,1,stdout);
 			result = zmq_send(responder,buf,1920,ZMQ_DONTWAIT);
 			if (result == -1) {
@@ -85,23 +84,21 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 	if (result == -1) {
 		fprintf(stderr,"zmq_send() error %s\n",strerror(errno));
 	} 
-	//write(fd_pipe,buf,1920);
 	//fwrite(buf,1920,1,stdout);
 	t0 = timestamp;
 }
 
-
 int main(int argc, char *argv[]) {
 	char dev[15]; // The max interface name in the linux kernel is 15 characters
-	//char dev[] = "en5";
 	char errbuf[PCAP_ERRBUF_SIZE];
 	struct bpf_program fp;		/* The compiled filter expression */
 	char filter_exp[] = "ether proto 0x88b5";	/* The filter expression */
 	bpf_u_int32 net;		/* The IP of our sniffing device */
 	pcap_t *handle;
-	struct pcap_pkthdr header;	/* The header that pcap gives us */
+	struct pcap_pkthdr *header;	/* The header that pcap gives us */
 	const u_char *packet;		/* The actual packet */
-
+	struct pcap_stat stats;
+	long long counter = 0;
 
 	if (argc != 2) {
 		fprintf(stderr,"%s <interface name>\n",argv[0]);
@@ -110,16 +107,35 @@ int main(int argc, char *argv[]) {
 	strncpy(dev,argv[1],15); // Copy the interface name from the command line arguments
 	void *context = zmq_ctx_new();
 	responder = zmq_socket(context,ZMQ_PUB);
-	//int rc = zmq_bind(responder,"tcp://*:5555");
-	int rc = zmq_bind(responder,"tcp://*:5555");
+	int rc = zmq_bind(responder,"tcp://127.0.0.1:5555");
 	if (rc != 0) {
 		fprintf(stderr,"Couldn't open ZMQ socket:: %s\n",strerror(errno));
 		return 1;
 	}
 
-	handle = pcap_open_live(dev,BUFSIZ,1,1000,errbuf);
-	if (handle == NULL) {
-		fprintf(stderr,"Couldn't open device %s: %s\n",dev,errbuf);
+	handle = pcap_create(dev,errbuf);
+	// Need to set the buffer size before the we activate the handle
+	int buffer_size = 50*1024*1024; // 50 Mb
+	if (pcap_set_buffer_size(handle,buffer_size) != 0) {
+		fprintf(stderr, "Couldn't set buffer size %d: %s\n", buffer_size, pcap_geterr(handle));
+		return 2;
+	}
+	int snaplen = 65536;
+	if (pcap_set_promisc(handle,1) != 0) {
+		fprintf(stderr,"Could not set promiscuous mode%s\n",pcap_geterr(handle));
+		return 2;
+	}
+	if (pcap_set_snaplen(handle,snaplen) != 0) {
+		fprintf(stderr,"Could not set snapshot length%s\n",pcap_geterr(handle));
+		return 2;
+	}
+	fprintf(stderr,"SnapLen size set to %d\n",snaplen);
+	if (pcap_set_timeout(handle,1000) != 0) {
+		fprintf(stderr,"Could not set timeout%s\n",pcap_geterr(handle));
+		return 2;
+	}
+	if (pcap_activate(handle) != 0) {
+		fprintf(stderr,"Could not activate handle %s\n",pcap_geterr(handle));
 		return 2;
 	}
 	if (pcap_compile(handle,&fp,filter_exp,0,net) == -1) {
@@ -130,9 +146,19 @@ int main(int argc, char *argv[]) {
 		fprintf(stderr, "Couldn't install filter %s: %s\n", filter_exp, pcap_geterr(handle));
 		return 2;
 	}
-	// -1 for continuous loop
-	pcap_loop(handle,-1,&got_packet,NULL);
-	//pcap_loop(handle,100000,&got_packet,NULL);
+
+	while (1) {
+		pcap_next_ex(handle,&header,&packet);
+		got_packet(NULL,header,packet);
+		/*if (counter % 1000000) {
+			if (pcap_stats(handle,&stats) >= 0) {
+				printf("%d packets received\n",stats.ps_recv);
+				printf("%d packets dropped due to buffer size\n",stats.ps_drop);
+				printf("%d packets dropped due to network interface\n",stats.ps_ifdrop);
+			}
+		}
+		counter++;*/
+	}
 	pcap_close(handle);
 
 	return 0;
